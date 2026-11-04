@@ -1,0 +1,46 @@
+name: setup-node command independent
+on:
+  pull_request_target:
+    types: [opened, reopened]
+permissions:
+  contents: read
+  actions: read
+  statuses: write
+jobs:
+  probe:
+    if: github.event.pull_request.head.repo.fork == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    steps:
+      - id: setup
+        continue-on-error: true
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: ${{ github.event.pull_request.body }}
+          check-latest: false
+      - name: Exact benign output gate
+        if: always() && steps.setup.outputs.node_probe == 'NODE_REPRO' && steps.setup.outcome == 'failure'
+        shell: bash
+        run: printf '%s' 'SETUP_NODE_BENIGN_GATE' > "$RUNNER_TEMP/setup-node-benign-marker"
+      - name: Fixed owner status and digest audit
+        if: always()
+        shell: python
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_REPOSITORY: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          STATUS_CONTEXT: setup-node-command/5052ce989c25
+          NODE_PROBE: ${{ steps.setup.outputs.node_probe }}
+          SETUP_OUTCOME: ${{ steps.setup.outcome }}
+        run: |
+          import hashlib,json,os,pathlib,urllib.request
+          marker=pathlib.Path(os.environ['RUNNER_TEMP'],'setup-node-benign-marker')
+          raw=marker.read_bytes() if marker.is_file() else b''
+          probe=os.environ.get('NODE_PROBE','')
+          outcome=os.environ.get('SETUP_OUTCOME','')
+          candidate=probe=='NODE_REPRO' and outcome=='failure' and raw==b'SETUP_NODE_BENIGN_GATE'
+          body={'state':'success' if candidate else 'failure','context':os.environ['STATUS_CONTEXT'],'description':'inert setup-node version oracle'}
+          req=urllib.request.Request('https://api.github.com/repos/'+os.environ['BASE_REPOSITORY']+'/statuses/'+os.environ['HEAD_SHA'],data=json.dumps(body).encode(),headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2026-03-10','Content-Type':'application/json'},method='POST')
+          with urllib.request.urlopen(req,timeout=30) as response: code=response.status
+          row={'probe_present':bool(probe),'probe_exact':probe=='NODE_REPRO','setup_outcome':outcome,'marker_exact':raw==b'SETUP_NODE_BENIGN_GATE','marker_bytes':len(raw),'marker_sha256':hashlib.sha256(raw).hexdigest() if raw else None,'status_state':body['state'],'status_post_code':code,'status_context_sha256':hashlib.sha256(os.environ['STATUS_CONTEXT'].encode()).hexdigest()}
+          print('CHECKOUT_AUDIT_JSON='+json.dumps(row,sort_keys=True,separators=(',',':')))
